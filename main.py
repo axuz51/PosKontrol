@@ -1,8 +1,11 @@
 import customtkinter as ctk
 
+from database import inicializar_base_datos
+
 
 # Configura y muestra la ventana principal del sistema.
 def main():
+    inicializar_base_datos()
     ctk.set_appearance_mode("system")
 
     app = ctk.CTk()
