@@ -1,19 +1,21 @@
 import customtkinter as ctk
 
 from database import inicializar_base_datos
+from pantallas.inventario import PantallaInventario
 
 
-# Configura y muestra la ventana principal del sistema.
+# Inicia la aplicación.
 def main():
     inicializar_base_datos()
-    ctk.set_appearance_mode("system")
+    ctk.set_appearance_mode("dark")
 
     app = ctk.CTk()
     app.title("POS-Kontrol")
-    app.geometry("900x600")
+    app.minsize(950, 620)
+    app.after(100, app.state, "zoomed")
 
-    titulo = ctk.CTkLabel(app, text="POS-Kontrol", font=("Arial", 28, "bold"))
-    titulo.pack(pady=40)
+    pantalla = PantallaInventario(app)
+    pantalla.pack(fill="both", expand=True)
 
     app.mainloop()
 

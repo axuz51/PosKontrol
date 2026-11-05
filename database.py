@@ -1,14 +1,28 @@
+from contextlib import contextmanager
 import sqlite3
 from pathlib import Path
+from typing import Generator
+from uuid import uuid4
 
 RUTA_BASE_DATOS = Path(__file__).with_name("poskontrol.db")
 
-# Crea las tablas del sistema.
-def inicializar_base_datos():
+
+# Abre la base de datos y administra el cierre de la conexión.
+@contextmanager
+def _conectar() -> Generator[sqlite3.Connection, None, None]:
     conexion = sqlite3.connect(RUTA_BASE_DATOS)
+    conexion.row_factory = sqlite3.Row
+    conexion.execute("PRAGMA foreign_keys = ON")
     try:
-        conexion.execute("PRAGMA foreign_keys = ON")
-        conexion.execute("BEGIN")
+        with conexion:
+            yield conexion
+    finally:
+        conexion.close()
+
+
+# Crea las tablas del sistema.
+def inicializar_base_datos() -> None:
+    with _conectar() as conexion:
         conexion.execute(
             """
             CREATE TABLE IF NOT EXISTS usuarios (
@@ -41,10 +55,17 @@ def inicializar_base_datos():
                 precio_costo INTEGER NOT NULL CHECK (precio_costo >= 0),
                 precio_venta INTEGER NOT NULL CHECK (precio_venta >= 0),
                 stock_minimo INTEGER NOT NULL DEFAULT 2 CHECK (stock_minimo >= 0),
+                codigo_barras TEXT,
                 FOREIGN KEY (categoria_id) REFERENCES categorias (id)
             )
             """
         )
+        columnas_producto = {
+            columna["name"]
+            for columna in conexion.execute("PRAGMA table_info(productos)")
+        }
+        if "codigo_barras" not in columnas_producto:
+            conexion.execute("ALTER TABLE productos ADD COLUMN codigo_barras TEXT")
         conexion.execute(
             """
             CREATE TABLE IF NOT EXISTS ventas (
@@ -110,12 +131,171 @@ def inicializar_base_datos():
             "CREATE INDEX IF NOT EXISTS idx_productos_nombre ON productos (nombre)"
         )
         conexion.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_productos_codigo_barras
+            ON productos (codigo_barras)
+            WHERE codigo_barras IS NOT NULL AND codigo_barras != ''
+            """
+        )
+        conexion.execute(
             "CREATE INDEX IF NOT EXISTS idx_ventas_fecha ON ventas (fecha)"
         )
         conexion.execute(
             "CREATE INDEX IF NOT EXISTS idx_egresos_fecha "
             "ON egresos_caja_menor (fecha)"
         )
-        conexion.commit()
-    finally:
-        conexion.close()
+
+
+# Revisa que los datos del producto sean válidos antes de guardarlos.
+def _validar_producto(
+    nombre: str,
+    categoria_id: int,
+    stock: int,
+    precio_costo: int,
+    precio_venta: int,
+    stock_minimo: int,
+) -> str:
+    nombre = nombre.strip()
+    if not nombre:
+        raise ValueError("El nombre del producto es obligatorio.")
+    if categoria_id <= 0:
+        raise ValueError("Selecciona una categoría válida.")
+    if min(stock, precio_costo, precio_venta, stock_minimo) < 0:
+        raise ValueError("El stock y los precios no pueden ser negativos.")
+    return nombre
+
+
+# Registra una categoría y devuelve su identificador.
+def agregar_categoria(nombre: str) -> int:
+    nombre = nombre.strip()
+    if not nombre:
+        raise ValueError("El nombre de la categoría es obligatorio.")
+    with _conectar() as conexion:
+        cursor = conexion.execute(
+            "INSERT INTO categorias (nombre) VALUES (?)",
+            (nombre,),
+        )
+        return cursor.lastrowid
+
+
+# Consulta las categorías ordenadas por nombre.
+def listar_categorias() -> list[sqlite3.Row]:
+    with _conectar() as conexion:
+        return conexion.execute(
+            "SELECT id, nombre FROM categorias ORDER BY nombre"
+        ).fetchall()
+
+
+# Registra un producto y le asigna un SKU interno consecutivo.
+def agregar_producto(
+    nombre: str,
+    categoria_id: int,
+    stock: int,
+    precio_costo: int,
+    precio_venta: int,
+    stock_minimo: int = 2,
+    codigo_barras: str | None = None,
+) -> str:
+    nombre = _validar_producto(
+        nombre, categoria_id, stock, precio_costo, precio_venta, stock_minimo
+    )
+    if codigo_barras is not None:
+        codigo_barras = codigo_barras.strip() or None
+    with _conectar() as conexion:
+        conexion.execute("BEGIN IMMEDIATE")
+        cursor = conexion.execute(
+            """
+            INSERT INTO productos (
+                codigo, nombre, categoria_id, stock, precio_costo,
+                precio_venta, stock_minimo, codigo_barras
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                f"__SKU_PENDIENTE_{uuid4().hex}__",
+                nombre,
+                categoria_id,
+                stock,
+                precio_costo,
+                precio_venta,
+                stock_minimo,
+                codigo_barras,
+            ),
+        )
+        producto_id = cursor.lastrowid
+        numero_sku = producto_id
+        while True:
+            codigo = f"SKU-{numero_sku:06d}"
+            repetido = conexion.execute(
+                "SELECT 1 FROM productos WHERE codigo = ?",
+                (codigo,),
+            ).fetchone()
+            if repetido is None:
+                break
+            numero_sku += 1
+        conexion.execute(
+            "UPDATE productos SET codigo = ? WHERE id = ?",
+            (codigo, producto_id),
+        )
+        return codigo
+
+
+# Busca productos por coincidencia parcial en su código, referencia o nombre.
+def listar_productos(busqueda: str = "") -> list[sqlite3.Row]:
+    busqueda = busqueda.strip()
+    patron = f"%{busqueda}%"
+    with _conectar() as conexion:
+        return conexion.execute(
+            """
+            SELECT
+                p.id, p.codigo, p.nombre, p.categoria_id, c.nombre AS categoria,
+                p.stock, p.precio_costo, p.precio_venta, p.stock_minimo,
+                p.codigo_barras
+            FROM productos AS p
+            JOIN categorias AS c ON c.id = p.categoria_id
+            WHERE p.codigo LIKE ? OR p.codigo_barras LIKE ? OR p.nombre LIKE ?
+            ORDER BY p.nombre
+            """,
+            (patron, patron, patron),
+        ).fetchall()
+
+
+# Actualiza los datos de un producto existente.
+def editar_producto(
+    producto_id: int,
+    nombre: str,
+    categoria_id: int,
+    stock: int,
+    precio_costo: int,
+    precio_venta: int,
+    stock_minimo: int = 2,
+    codigo_barras: str | None = None,
+) -> None:
+    if producto_id <= 0:
+        raise ValueError("El identificador del producto no es válido.")
+    nombre = _validar_producto(
+        nombre, categoria_id, stock, precio_costo, precio_venta, stock_minimo
+    )
+    if codigo_barras is not None:
+        codigo_barras = codigo_barras.strip() or None
+    with _conectar() as conexion:
+        cursor = conexion.execute(
+            """
+            UPDATE productos
+            SET nombre = ?, categoria_id = ?, stock = ?, precio_costo = ?,
+                precio_venta = ?, stock_minimo = ?, codigo_barras = ?
+            WHERE id = ?
+            """,
+            (
+                nombre,
+                categoria_id,
+                stock,
+                precio_costo,
+                precio_venta,
+                stock_minimo,
+                codigo_barras,
+                producto_id,
+            ),
+        )
+        if cursor.rowcount == 0:
+            raise LookupError("No se encontró el producto que quieres editar.")
