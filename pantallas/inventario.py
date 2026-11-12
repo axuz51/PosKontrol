@@ -11,6 +11,7 @@ from database import (
     listar_categorias,
     listar_productos,
 )
+from pantallas.formato import formatear_pesos, leer_importe
 
 
 FONDO = "#111315"
@@ -23,30 +24,12 @@ ACENTO = "#00c9b7"
 ROJO = "#e36b72"
 
 
-def _formatear_pesos(valor: int) -> str:
-    # En la pantalla se usan puntos para separar los miles.
-    return f"$ {valor:,}".replace(",", ".")
-
-
-def _leer_precio(valor: str) -> int:
-    partes = valor.strip().split(".")
-    if not partes or not partes[0].isdecimal():
-        raise ValueError("Ingresa un precio entero válido.")
-    # Si hay puntos, cada grupo después del primero debe tener tres dígitos.
-    if len(partes) > 1 and (
-        not 1 <= len(partes[0]) <= 3
-        or any(len(parte) != 3 or not parte.isdecimal() for parte in partes[1:])
-    ):
-        raise ValueError("Usa puntos solo para separar grupos de miles.")
-    return int("".join(partes))
-
-
 def _formatear_entrada_precio(evento: tk.Event) -> None:
     entrada = evento.widget
     texto = entrada.get()
     if not texto or any(not caracter.isdecimal() and caracter != "." for caracter in texto):
         return
-    # Se conserva la posición del cursor contando los dígitos antes de él.
+    # Al agregar puntos de miles, el cursor se ubica según los dígitos que tenía antes.
     posicion = entrada.index(tk.INSERT)
     digitos_antes = sum(caracter.isdecimal() for caracter in texto[:posicion])
     digitos = "".join(caracter for caracter in texto if caracter.isdecimal())
@@ -67,12 +50,14 @@ def _formatear_entrada_precio(evento: tk.Event) -> None:
 
 def _limpiar_entrada_numerica(evento: tk.Event) -> None:
     entrada = evento.widget
+    # Al enfocar el campo se puede reemplazar el valor completo sin borrarlo a mano.
     entrada._valor_anterior = entrada.get()
     entrada.delete(0, "end")
 
 
 def _restaurar_entrada_numerica(evento: tk.Event) -> None:
     entrada = evento.widget
+    # Si no se escribió un valor nuevo, se conserva el que ya tenía el campo.
     if not entrada.get():
         entrada.insert(0, entrada._valor_anterior)
 
@@ -89,7 +74,7 @@ def _crear_pildora(canvas: tk.Canvas, x1: float, y1: float, x2: float, y2: float
 
 
 class PantallaInventario(ctk.CTkFrame):
-    def __init__(self, master):
+    def __init__(self, master, mostrar_barra_lateral: bool = True):
         super().__init__(master, fg_color=FONDO, corner_radius=0)
         # Estos valores guardan los filtros actuales mientras se actualiza la tabla.
         self.categoria_seleccionada: int | None = None
@@ -99,7 +84,8 @@ class PantallaInventario(ctk.CTkFrame):
         self._fin_barra_categorias = 1.0
         self._desfase_barra_categorias = 0.0
 
-        self._crear_barra_lateral()
+        if mostrar_barra_lateral:
+            self._crear_barra_lateral()
         self._crear_contenido()
         self.actualizar()
 
@@ -357,6 +343,7 @@ class PantallaInventario(ctk.CTkFrame):
             evento.widget in (self.tabla, self.filas._parent_canvas)
             and not self._ajuste_columnas_programado
         ):
+            # Se espera a que termine el cambio de tamaño antes de medir las columnas.
             self._ajuste_columnas_programado = True
             self.after_idle(self._ajustar_columnas_tabla)
 
@@ -439,6 +426,7 @@ class PantallaInventario(ctk.CTkFrame):
             # Se conserva dónde se tomó el control para que no salte al arrastrarlo.
             self._desfase_barra_categorias = evento.x - posicion_control
         else:
+            # Si se hace clic fuera del control, se centra en ese punto.
             self._desfase_barra_categorias = ancho_control / 2
             self._mover_barra_categorias(evento.x)
 
@@ -452,6 +440,7 @@ class PantallaInventario(ctk.CTkFrame):
         fraccion_visible = self._fin_barra_categorias - self._inicio_barra_categorias
         maximo_inicio = 1 - fraccion_visible
         inicio = (posicion - self._desfase_barra_categorias) / ancho
+        # Se limita el desplazamiento para que no queden espacios vacíos en los extremos.
         inicio = max(0.0, min(maximo_inicio, inicio))
         self.botones_categorias._parent_canvas.xview_moveto(inicio)
 
@@ -535,7 +524,7 @@ class PantallaInventario(ctk.CTkFrame):
             text=f"{len(bajos)} requieren reposición",
             text_color=ROJO if bajos else TEXTO,
         )
-        self.tarjeta_valor.configure(text=_formatear_pesos(valor_inventario))
+        self.tarjeta_valor.configure(text=formatear_pesos(valor_inventario))
 
         # La búsqueda, la categoría y el estado se aplican juntos a la lista visible.
         filtrados = resultados
@@ -594,11 +583,11 @@ class PantallaInventario(ctk.CTkFrame):
             anchor="center", font=("Arial", 10, "bold")
         ).grid(row=numero, column=3, sticky="ew", padx=4, pady=11)
         ctk.CTkLabel(
-            self.filas, text=_formatear_pesos(producto["precio_costo"]),
+            self.filas, text=formatear_pesos(producto["precio_costo"]),
             text_color=TEXTO_SUAVE, anchor="center", font=("Arial", 10)
         ).grid(row=numero, column=4, sticky="ew", padx=4, pady=11)
         ctk.CTkLabel(
-            self.filas, text=_formatear_pesos(producto["precio_venta"]),
+            self.filas, text=formatear_pesos(producto["precio_venta"]),
             text_color=TEXTO_SUAVE, anchor="center", font=("Arial", 10)
         ).grid(row=numero, column=5, sticky="ew", padx=4, pady=11)
         # El estado depende del mínimo que se configuró para este producto.
@@ -766,8 +755,8 @@ class PantallaInventario(ctk.CTkFrame):
                     entradas["Nombre del producto"].get(),
                     nombres_categoria[categoria_var.get()],
                     int(entradas["Existencias"].get()),
-                    _leer_precio(entradas["Precio de costo"].get()),
-                    _leer_precio(entradas["Precio de venta"].get()),
+                    leer_importe(entradas["Precio de costo"].get()),
+                    leer_importe(entradas["Precio de venta"].get()),
                     int(entradas["Stock mínimo"].get()),
                     entradas["Código de barras (opcional)"].get(),
                 )
