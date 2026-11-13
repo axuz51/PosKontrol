@@ -436,9 +436,7 @@ class PantallaPuntoVenta(ctk.CTkFrame):
                 placeholder_text="Descuento",
             )
             if linea["descuento"]:
-                descuento.insert(
-                    0, f"{linea['descuento']:,}".replace(",", ".")
-                )
+                descuento.insert(0, formatear_numero(linea["descuento"]))
             descuento.grid(row=1, column=0, sticky="w", pady=(3, 0))
             descuento.bind(
                 "<FocusIn>",
@@ -549,7 +547,7 @@ class PantallaPuntoVenta(ctk.CTkFrame):
         entrada = self._descuentos[producto_id]
         entrada.delete(0, "end")
         if descuento:
-            entrada.insert(0, f"{descuento:,}".replace(",", "."))
+            entrada.insert(0, formatear_numero(descuento))
         self._actualizar_totales()
 
     def _previsualizar_descuento(self, producto_id: int) -> None:

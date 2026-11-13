@@ -4,6 +4,7 @@ import customtkinter as ctk
 
 from database import inicializar_base_datos
 from pantallas.acceso import PantallaAcceso, VentanaCajeros
+from pantallas.compras import PantallaCompras
 from pantallas.inventario import PantallaInventario
 from pantallas.punto_venta import PantallaPuntoVenta
 
@@ -59,10 +60,14 @@ class Aplicacion(ctk.CTkFrame):
             font=("Arial", 10, "bold"),
         ).pack(fill="x", padx=18, pady=(0, 8))
         self._botones_navegacion = {}
-        for nombre, destino in (
+        # Desde aquí también se puede entrar a compras sin perder las otras pantallas.
+        opciones_operacion = [
             ("Punto de venta", "venta"),
             ("Inventario", "inventario"),
-        ):
+        ]
+        if usuario["rol"] == "ADMINISTRADOR":
+            opciones_operacion.append(("Compras", "compras"))
+        for nombre, destino in opciones_operacion:
             boton = ctk.CTkButton(
                 self.barra,
                 text=f"  ◈  {nombre}",
@@ -75,16 +80,6 @@ class Aplicacion(ctk.CTkFrame):
             )
             boton.pack(fill="x", padx=10, pady=2)
             self._botones_navegacion[destino] = boton
-        ctk.CTkButton(
-            self.barra,
-            text="  ◈  Ventas",
-            height=36,
-            anchor="w",
-            fg_color="transparent",
-            hover_color="#202224",
-            text_color="#696d70",
-            state="disabled",
-        ).pack(fill="x", padx=10, pady=2)
         ctk.CTkLabel(
             self.barra,
             text="ADMINISTRACIÓN",
@@ -135,12 +130,17 @@ class Aplicacion(ctk.CTkFrame):
     def _mostrar_pantalla(self, nombre: str) -> None:
         if not self.contenido or not self.usuario:
             return
+        if nombre == "compras" and self.usuario["rol"] != "ADMINISTRADOR":
+            return
         if self.pantalla:
             self.pantalla.pack_forget()
         if nombre not in self._pantallas:
             # Cada pantalla se crea una sola vez y luego se vuelve a mostrar.
             if nombre == "venta":
                 pantalla = PantallaPuntoVenta(self.contenido, self.usuario)
+            elif nombre == "compras":
+                # Esta pantalla usa el usuario actual para guardar quién hizo la compra.
+                pantalla = PantallaCompras(self.contenido, self.usuario)
             else:
                 pantalla = PantallaInventario(
                     self.contenido, mostrar_barra_lateral=False
@@ -149,6 +149,9 @@ class Aplicacion(ctk.CTkFrame):
         self.pantalla = self._pantallas[nombre]
         self.pantalla.pack(fill="both", expand=True)
         if nombre == "inventario":
+            self.pantalla.actualizar()
+        elif nombre == "compras":
+            # Se actualiza el historial al volver a compras después de guardar algo.
             self.pantalla.actualizar()
         else:
             self.pantalla._buscar_productos()

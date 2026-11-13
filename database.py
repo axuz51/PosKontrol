@@ -70,6 +70,75 @@ def inicializar_base_datos() -> None:
         }
         if "codigo_barras" not in columnas_producto:
             conexion.execute("ALTER TABLE productos ADD COLUMN codigo_barras TEXT")
+        # Aquí quedan guardados los datos de contacto de cada proveedor.
+        conexion.execute(
+            """
+            CREATE TABLE IF NOT EXISTS proveedores (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                nombre TEXT NOT NULL UNIQUE,
+                telefono TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        # Esta tabla guarda los datos generales de cada compra.
+        conexion.execute(
+            """
+            CREATE TABLE IF NOT EXISTS compras (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                usuario_id INTEGER NOT NULL,
+                proveedor_id INTEGER NOT NULL,
+                fecha TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                total INTEGER NOT NULL CHECK (total >= 0),
+                FOREIGN KEY (usuario_id) REFERENCES usuarios (id),
+                FOREIGN KEY (proveedor_id) REFERENCES proveedores (id)
+            )
+            """
+        )
+        # En cada detalle se guarda el producto, cuántas unidades llegaron y su costo.
+        conexion.execute(
+            """
+            CREATE TABLE IF NOT EXISTS detalle_compras (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                compra_id INTEGER NOT NULL,
+                producto_id INTEGER NOT NULL,
+                cantidad INTEGER NOT NULL CHECK (cantidad > 0),
+                costo_unitario INTEGER NOT NULL CHECK (costo_unitario >= 0),
+                precio_venta INTEGER CHECK (precio_venta >= 0),
+                FOREIGN KEY (compra_id) REFERENCES compras (id),
+                FOREIGN KEY (producto_id) REFERENCES productos (id)
+            )
+            """
+        )
+        columnas_detalle_compra = {
+            columna["name"]
+            for columna in conexion.execute("PRAGMA table_info(detalle_compras)")
+        }
+        # En las compras antiguas el precio de venta no quedó guardado.
+        if "precio_venta" not in columnas_detalle_compra:
+            conexion.execute(
+                "ALTER TABLE detalle_compras ADD COLUMN precio_venta INTEGER "
+                "CHECK (precio_venta >= 0)"
+            )
+        conexion.execute(
+            """
+            CREATE TABLE IF NOT EXISTS historial_ediciones_compras (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                compra_id INTEGER NOT NULL,
+                detalle_compra_id INTEGER NOT NULL,
+                usuario_id INTEGER NOT NULL,
+                producto_nombre TEXT NOT NULL,
+                campo TEXT NOT NULL CHECK (
+                    campo IN ('cantidad', 'costo_unitario', 'precio_venta')
+                ),
+                valor_anterior INTEGER,
+                valor_nuevo INTEGER NOT NULL,
+                fecha TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (compra_id) REFERENCES compras (id),
+                FOREIGN KEY (detalle_compra_id) REFERENCES detalle_compras (id),
+                FOREIGN KEY (usuario_id) REFERENCES usuarios (id)
+            )
+            """
+        )
         conexion.execute(
             """
             CREATE TABLE IF NOT EXISTS ventas (
@@ -169,6 +238,10 @@ def inicializar_base_datos() -> None:
         )
         conexion.execute(
             "CREATE INDEX IF NOT EXISTS idx_ventas_fecha ON ventas (fecha)"
+        )
+        # Este índice ayuda a ordenar las compras por fecha cuando se consultan.
+        conexion.execute(
+            "CREATE INDEX IF NOT EXISTS idx_compras_fecha ON compras (fecha)"
         )
         conexion.execute(
             "CREATE INDEX IF NOT EXISTS idx_pagos_venta_metodo "
@@ -414,6 +487,59 @@ def listar_categorias() -> list[sqlite3.Row]:
         ).fetchall()
 
 
+# Este método crea el producto dentro de una conexión que ya está abierta.
+def _insertar_producto(
+    conexion: sqlite3.Connection,
+    nombre: str,
+    categoria_id: int,
+    stock: int,
+    precio_costo: int,
+    precio_venta: int,
+    stock_minimo: int,
+    codigo_barras: str | None,
+) -> tuple[int, str]:
+    nombre = _validar_producto(
+        nombre, categoria_id, stock, precio_costo, precio_venta, stock_minimo
+    )
+    if codigo_barras is not None:
+        codigo_barras = codigo_barras.strip() or None
+    cursor = conexion.execute(
+        """
+        INSERT INTO productos (
+            codigo, nombre, categoria_id, stock, precio_costo,
+            precio_venta, stock_minimo, codigo_barras
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            f"__SKU_PENDIENTE_{uuid4().hex}__",
+            nombre,
+            categoria_id,
+            stock,
+            precio_costo,
+            precio_venta,
+            stock_minimo,
+            codigo_barras,
+        ),
+    )
+    producto_id = cursor.lastrowid
+    numero_sku = producto_id
+    while True:
+        codigo = f"SKU-{numero_sku:06d}"
+        repetido = conexion.execute(
+            "SELECT 1 FROM productos WHERE codigo = ?",
+            (codigo,),
+        ).fetchone()
+        if repetido is None:
+            break
+        numero_sku += 1
+    conexion.execute(
+        "UPDATE productos SET codigo = ? WHERE id = ?",
+        (codigo, producto_id),
+    )
+    return producto_id, codigo
+
+
 # Esto crea el producto y le asigna un SKU para identificarlo.
 def agregar_producto(
     nombre: str,
@@ -424,57 +550,32 @@ def agregar_producto(
     stock_minimo: int = 2,
     codigo_barras: str | None = None,
 ) -> str:
-    nombre = _validar_producto(
-        nombre, categoria_id, stock, precio_costo, precio_venta, stock_minimo
-    )
-    if codigo_barras is not None:
-        codigo_barras = codigo_barras.strip() or None
     with _conectar() as conexion:
         conexion.execute("BEGIN IMMEDIATE")
-        cursor = conexion.execute(
-            """
-            INSERT INTO productos (
-                codigo, nombre, categoria_id, stock, precio_costo,
-                precio_venta, stock_minimo, codigo_barras
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                f"__SKU_PENDIENTE_{uuid4().hex}__",
-                nombre,
-                categoria_id,
-                stock,
-                precio_costo,
-                precio_venta,
-                stock_minimo,
-                codigo_barras,
-            ),
-        )
-        producto_id = cursor.lastrowid
-        numero_sku = producto_id
-        while True:
-            codigo = f"SKU-{numero_sku:06d}"
-            repetido = conexion.execute(
-                "SELECT 1 FROM productos WHERE codigo = ?",
-                (codigo,),
-            ).fetchone()
-            if repetido is None:
-                break
-            numero_sku += 1
-        conexion.execute(
-            "UPDATE productos SET codigo = ? WHERE id = ?",
-            (codigo, producto_id),
+        _producto_id, codigo = _insertar_producto(
+            conexion,
+            nombre,
+            categoria_id,
+            stock,
+            precio_costo,
+            precio_venta,
+            stock_minimo,
+            codigo_barras,
         )
         return codigo
 
 
 # Esta búsqueda sirve para encontrar productos por nombre, SKU o código de barras.
-def listar_productos(busqueda: str = "") -> list[sqlite3.Row]:
+def listar_productos(
+    busqueda: str = "", limite: int | None = None
+) -> list[sqlite3.Row]:
     busqueda = busqueda.strip()
     patron = f"%{busqueda}%"
+    # En compras se limita la lista para que la búsqueda no cargue todo el inventario.
+    if limite is not None and limite <= 0:
+        raise ValueError("El límite de productos debe ser mayor que cero.")
     with _conectar() as conexion:
-        return conexion.execute(
-            """
+        consulta = """
             SELECT
                 p.id, p.codigo, p.nombre, p.categoria_id, c.nombre AS categoria,
                 p.stock, p.precio_costo, p.precio_venta, p.stock_minimo,
@@ -483,9 +584,402 @@ def listar_productos(busqueda: str = "") -> list[sqlite3.Row]:
             JOIN categorias AS c ON c.id = p.categoria_id
             WHERE p.codigo LIKE ? OR p.codigo_barras LIKE ? OR p.nombre LIKE ?
             ORDER BY p.nombre
-            """,
-            (patron, patron, patron),
+        """
+        parametros: tuple = (patron, patron, patron)
+        if limite is not None:
+            consulta += " LIMIT ?"
+            parametros += (limite,)
+        return conexion.execute(consulta, parametros).fetchall()
+
+
+# Aquí se guarda el proveedor con su teléfono si se quiere registrar.
+def agregar_proveedor(nombre: str, telefono: str = "") -> int:
+    nombre = nombre.strip()
+    telefono = telefono.strip()
+    if not nombre:
+        raise ValueError("El nombre del proveedor es obligatorio.")
+    with _conectar() as conexion:
+        cursor = conexion.execute(
+            "INSERT INTO proveedores (nombre, telefono) VALUES (?, ?)",
+            (nombre, telefono),
+        )
+        return cursor.lastrowid
+
+
+# Esta lista se usa para escoger el proveedor al registrar una compra.
+def listar_proveedores() -> list[sqlite3.Row]:
+    with _conectar() as conexion:
+        return conexion.execute(
+            "SELECT id, nombre, telefono FROM proveedores ORDER BY nombre"
         ).fetchall()
+
+
+# Aquí se consultan las compras más recientes para mostrarlas en la pantalla.
+def listar_compras() -> list[sqlite3.Row]:
+    with _conectar() as conexion:
+        return conexion.execute(
+            """
+            SELECT c.id, c.fecha, c.total, p.nombre AS proveedor
+            FROM compras AS c
+            JOIN proveedores AS p ON p.id = c.proveedor_id
+            ORDER BY c.fecha DESC, c.id DESC
+            LIMIT 100
+            """
+        ).fetchall()
+
+
+# Esta consulta trae quién registró la compra y los productos que llegaron.
+def obtener_detalle_compra(
+    compra_id: int,
+) -> tuple[sqlite3.Row | None, list[sqlite3.Row]]:
+    with _conectar() as conexion:
+        compra = conexion.execute(
+            """
+            SELECT c.id, c.fecha, c.total, p.nombre AS proveedor,
+                   u.nombre AS usuario
+            FROM compras AS c
+            JOIN proveedores AS p ON p.id = c.proveedor_id
+            JOIN usuarios AS u ON u.id = c.usuario_id
+            WHERE c.id = ?
+            """,
+            (compra_id,),
+        ).fetchone()
+        if not compra:
+            return None, []
+        productos = conexion.execute(
+            """
+            SELECT dc.id AS detalle_id, dc.precio_venta,
+                   pr.codigo, pr.nombre, dc.cantidad, dc.costo_unitario,
+                   dc.cantidad * dc.costo_unitario AS subtotal
+            FROM detalle_compras AS dc
+            JOIN productos AS pr ON pr.id = dc.producto_id
+            WHERE dc.compra_id = ?
+            ORDER BY dc.id
+            """,
+            (compra_id,),
+        ).fetchall()
+        return compra, productos
+
+
+# Aquí se consultan los cambios hechos para que no se pierda el historial.
+def listar_ediciones_compra(compra_id: int) -> list[sqlite3.Row]:
+    with _conectar() as conexion:
+        return conexion.execute(
+            """
+            SELECT fecha, producto_nombre, campo, valor_anterior,
+                   valor_nuevo, usuarios.nombre AS usuario
+            FROM historial_ediciones_compras AS historial
+            JOIN usuarios ON usuarios.id = historial.usuario_id
+            WHERE historial.compra_id = ?
+            ORDER BY historial.id DESC
+            LIMIT 50
+            """,
+            (compra_id,),
+        ).fetchall()
+
+
+# Esta función corrige la compra y el inventario dentro de una sola transacción.
+def editar_compra(
+    compra_id: int,
+    usuario_id: int,
+    lineas: list[dict[str, int | None]],
+) -> int:
+    if type(compra_id) is not int or compra_id <= 0:
+        raise ValueError("La compra seleccionada no es válida.")
+    if type(usuario_id) is not int or usuario_id <= 0:
+        raise ValueError("El usuario no es válido.")
+    if not lineas:
+        raise ValueError("La compra debe conservar al menos un producto.")
+
+    cambios_por_detalle: dict[int, dict[str, int | None]] = {}
+    for linea in lineas:
+        detalle_id = linea.get("detalle_id")
+        cantidad = linea.get("cantidad")
+        costo_unitario = linea.get("costo_unitario")
+        precio_venta = linea.get("precio_venta")
+        if (
+            type(detalle_id) is not int
+            or detalle_id <= 0
+            or type(cantidad) is not int
+            or cantidad <= 0
+            or type(costo_unitario) is not int
+            or costo_unitario < 0
+            or precio_venta is not None
+            and (type(precio_venta) is not int or precio_venta < 0)
+        ):
+            raise ValueError("Revisa las cantidades y los precios de la compra.")
+        if detalle_id in cambios_por_detalle:
+            raise ValueError("Un producto no puede repetirse en la corrección.")
+        cambios_por_detalle[detalle_id] = {
+            "cantidad": cantidad,
+            "costo_unitario": costo_unitario,
+            "precio_venta": precio_venta,
+        }
+
+    with _conectar() as conexion:
+        conexion.execute("BEGIN IMMEDIATE")
+        usuario = conexion.execute(
+            "SELECT activo, rol FROM usuarios WHERE id = ?", (usuario_id,)
+        ).fetchone()
+        if not usuario or not usuario["activo"]:
+            raise LookupError("El usuario no existe o está inactivo.")
+        if usuario["rol"] != "ADMINISTRADOR":
+            raise PermissionError("Solo el administrador puede corregir compras.")
+        compra = conexion.execute(
+            "SELECT id, fecha FROM compras WHERE id = ?", (compra_id,)
+        ).fetchone()
+        if not compra:
+            raise LookupError("No se encontró la compra seleccionada.")
+        detalles = conexion.execute(
+            """
+            SELECT dc.id, dc.producto_id, dc.cantidad, dc.costo_unitario,
+                   dc.precio_venta, p.nombre, p.stock
+            FROM detalle_compras AS dc
+            JOIN productos AS p ON p.id = dc.producto_id
+            WHERE dc.compra_id = ?
+            """,
+            (compra_id,),
+        ).fetchall()
+        ids_guardados = {detalle["id"] for detalle in detalles}
+        if ids_guardados != set(cambios_por_detalle):
+            raise ValueError("La lista de productos cambió. Vuelve a abrir la compra.")
+
+        total = 0
+        for detalle in detalles:
+            valores = cambios_por_detalle[detalle["id"]]
+            cantidad = valores["cantidad"]
+            costo_unitario = valores["costo_unitario"]
+            precio_venta = valores["precio_venta"]
+            if precio_venta is None and detalle["precio_venta"] is not None:
+                precio_venta = detalle["precio_venta"]
+
+            diferencia_stock = cantidad - detalle["cantidad"]
+            if diferencia_stock:
+                cursor = conexion.execute(
+                    """
+                    UPDATE productos
+                    SET stock = stock + ?
+                    WHERE id = ? AND stock + ? >= 0
+                    """,
+                    (
+                        diferencia_stock,
+                        detalle["producto_id"],
+                        diferencia_stock,
+                    ),
+                )
+                if cursor.rowcount == 0:
+                    raise ValueError(
+                        f"No se puede reducir la cantidad de {detalle['nombre']}: "
+                        "ya se vendieron unidades y el stock quedaría negativo."
+                    )
+
+            es_compra_mas_reciente = not conexion.execute(
+                """
+                SELECT 1
+                FROM detalle_compras AS otra_linea
+                JOIN compras AS otra_compra ON otra_compra.id = otra_linea.compra_id
+                WHERE otra_linea.producto_id = ?
+                    AND (
+                        otra_compra.fecha > ?
+                        OR (otra_compra.fecha = ? AND otra_compra.id > ?)
+                    )
+                LIMIT 1
+                """,
+                (
+                    detalle["producto_id"],
+                    compra["fecha"],
+                    compra["fecha"],
+                    compra_id,
+                ),
+            ).fetchone()
+            if es_compra_mas_reciente:
+                actualizaciones_producto = []
+                parametros_producto: list[int] = []
+                if costo_unitario != detalle["costo_unitario"]:
+                    actualizaciones_producto.append("precio_costo = ?")
+                    parametros_producto.append(costo_unitario)
+                if (
+                    valores["precio_venta"] is not None
+                    and valores["precio_venta"] != detalle["precio_venta"]
+                ):
+                    actualizaciones_producto.append("precio_venta = ?")
+                    parametros_producto.append(valores["precio_venta"])
+                if actualizaciones_producto:
+                    parametros_producto.append(detalle["producto_id"])
+                    conexion.execute(
+                        f"UPDATE productos SET {', '.join(actualizaciones_producto)} "
+                        "WHERE id = ?",
+                        parametros_producto,
+                    )
+
+            for campo, valor_anterior, valor_nuevo in (
+                ("cantidad", detalle["cantidad"], cantidad),
+                ("costo_unitario", detalle["costo_unitario"], costo_unitario),
+                ("precio_venta", detalle["precio_venta"], precio_venta),
+            ):
+                if valor_anterior == valor_nuevo:
+                    continue
+                conexion.execute(
+                    """
+                    INSERT INTO historial_ediciones_compras (
+                        compra_id, detalle_compra_id, usuario_id, producto_nombre,
+                        campo, valor_anterior, valor_nuevo
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        compra_id,
+                        detalle["id"],
+                        usuario_id,
+                        detalle["nombre"],
+                        campo,
+                        valor_anterior,
+                        valor_nuevo,
+                    ),
+                )
+
+            conexion.execute(
+                """
+                UPDATE detalle_compras
+                SET cantidad = ?, costo_unitario = ?, precio_venta = ?
+                WHERE id = ?
+                """,
+                (cantidad, costo_unitario, precio_venta, detalle["id"]),
+            )
+            total += cantidad * costo_unitario
+
+        conexion.execute(
+            "UPDATE compras SET total = ? WHERE id = ?", (total, compra_id)
+        )
+        return total
+
+
+# Este proceso registra la compra y suma las unidades recibidas al inventario.
+def registrar_compra(
+    usuario_id: int,
+    proveedor_id: int,
+    productos: list[dict[str, int | str | bool | None]],
+) -> tuple[int, int]:
+    if not productos:
+        raise ValueError("Agrega al menos un producto a la compra.")
+
+    # Se revisan los datos antes de guardar para evitar compras con líneas repetidas o inválidas.
+    ids_vistos = set()
+    for item in productos:
+        producto_id = item.get("producto_id")
+        cantidad = item.get("cantidad")
+        costo_unitario = item.get("costo_unitario")
+        precio_venta = item.get("precio_venta")
+        es_nuevo = item.get("nuevo", False)
+        if (
+            type(es_nuevo) is not bool
+            or type(cantidad) is not int
+            or type(costo_unitario) is not int
+            or cantidad <= 0
+            or costo_unitario < 0
+            or type(precio_venta) is not int
+            or precio_venta < 0
+        ):
+            raise ValueError("Revisa el producto, la cantidad y los precios.")
+        if es_nuevo:
+            if (
+                producto_id is not None
+                or not isinstance(item.get("nombre"), str)
+                or not item["nombre"].strip()
+                or type(item.get("categoria_id")) is not int
+                or item["categoria_id"] <= 0
+                or type(item.get("stock_minimo", 2)) is not int
+                or item.get("stock_minimo", 2) < 0
+                or item.get("codigo_barras") is not None
+                and not isinstance(item.get("codigo_barras"), str)
+            ):
+                raise ValueError("Revisa el nombre, la categoría y el stock mínimo.")
+        else:
+            if type(producto_id) is not int or producto_id <= 0:
+                raise ValueError("Selecciona un producto válido.")
+            if producto_id in ids_vistos:
+                raise ValueError("Un producto no puede repetirse en la compra.")
+            ids_vistos.add(producto_id)
+
+    with _conectar() as conexion:
+        # La compra y el aumento de inventario se guardan juntos.
+        conexion.execute("BEGIN IMMEDIATE")
+        usuario = conexion.execute(
+            "SELECT activo FROM usuarios WHERE id = ?", (usuario_id,)
+        ).fetchone()
+        if not usuario or not usuario["activo"]:
+            raise LookupError("El usuario no existe o está inactivo.")
+        if not conexion.execute(
+            "SELECT 1 FROM proveedores WHERE id = ?", (proveedor_id,)
+        ).fetchone():
+            raise LookupError("No se encontró el proveedor seleccionado.")
+
+        # Se confirma que los productos existan y se calcula el total antes de guardar.
+        lineas = []
+        total = 0
+        for item in productos:
+            cantidad = item["cantidad"]
+            costo_unitario = item["costo_unitario"]
+            precio_venta = item["precio_venta"]
+            if item.get("nuevo", False):
+                producto_id, _codigo = _insertar_producto(
+                    conexion,
+                    item["nombre"],
+                    item["categoria_id"],
+                    0,
+                    costo_unitario,
+                    precio_venta,
+                    item.get("stock_minimo", 2),
+                    item.get("codigo_barras"),
+                )
+                producto = conexion.execute(
+                    "SELECT id, nombre FROM productos WHERE id = ?",
+                    (producto_id,),
+                ).fetchone()
+            else:
+                producto = conexion.execute(
+                    "SELECT id, nombre FROM productos WHERE id = ?",
+                    (item["producto_id"],),
+                ).fetchone()
+                if not producto:
+                    raise LookupError("Uno de los productos ya no está disponible.")
+            total += cantidad * costo_unitario
+            lineas.append((producto, cantidad, costo_unitario, precio_venta))
+
+        cursor = conexion.execute(
+            """
+            INSERT INTO compras (usuario_id, proveedor_id, total)
+            VALUES (?, ?, ?)
+            """,
+            (usuario_id, proveedor_id, total),
+        )
+        compra_id = cursor.lastrowid
+        for producto, cantidad, costo_unitario, precio_venta in lineas:
+            conexion.execute(
+                """
+                INSERT INTO detalle_compras (
+                    compra_id, producto_id, cantidad, costo_unitario, precio_venta
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    compra_id,
+                    producto["id"],
+                    cantidad,
+                    costo_unitario,
+                    precio_venta,
+                ),
+            )
+            # Los nuevos precios se usan en las siguientes ventas, las anteriores quedan igual.
+            conexion.execute(
+                """
+                UPDATE productos
+                SET stock = stock + ?, precio_costo = ?, precio_venta = ?
+                WHERE id = ?
+                """,
+                (cantidad, costo_unitario, precio_venta, producto["id"]),
+            )
+        return compra_id, total
 
 
 # Aquí se actualizan los datos del producto sin perder su referencia.

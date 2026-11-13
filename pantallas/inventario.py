@@ -11,7 +11,11 @@ from database import (
     listar_categorias,
     listar_productos,
 )
-from pantallas.formato import formatear_pesos, leer_importe
+from pantallas.formato import (
+    formatear_entrada_precio,
+    formatear_pesos,
+    leer_importe,
+)
 
 
 FONDO = "#111315"
@@ -22,30 +26,6 @@ TEXTO = "#eeeeee"
 TEXTO_SUAVE = "#969a9d"
 ACENTO = "#00c9b7"
 ROJO = "#e36b72"
-
-
-def _formatear_entrada_precio(evento: tk.Event) -> None:
-    entrada = evento.widget
-    texto = entrada.get()
-    if not texto or any(not caracter.isdecimal() and caracter != "." for caracter in texto):
-        return
-    # Al agregar puntos de miles, el cursor se ubica según los dígitos que tenía antes.
-    posicion = entrada.index(tk.INSERT)
-    digitos_antes = sum(caracter.isdecimal() for caracter in texto[:posicion])
-    digitos = "".join(caracter for caracter in texto if caracter.isdecimal())
-    if not digitos:
-        return
-    valor = int(digitos)
-    formateado = f"{valor:,}".replace(",", ".")
-    nueva_posicion = 0
-    digitos_contados = 0
-    while nueva_posicion < len(formateado) and digitos_contados < digitos_antes:
-        if formateado[nueva_posicion].isdecimal():
-            digitos_contados += 1
-        nueva_posicion += 1
-    entrada.delete(0, "end")
-    entrada.insert(0, formateado)
-    entrada.icursor(nueva_posicion)
 
 
 def _limpiar_entrada_numerica(evento: tk.Event) -> None:
@@ -717,8 +697,8 @@ class PantallaInventario(ctk.CTkFrame):
                 entrada.bind("<FocusIn>", _limpiar_entrada_numerica)
                 entrada.bind("<FocusOut>", _restaurar_entrada_numerica)
             if etiqueta in ("Precio de costo", "Precio de venta"):
-                entrada.bind("<KeyRelease>", _formatear_entrada_precio)
-                entrada.bind("<FocusOut>", _formatear_entrada_precio, add="+")
+                entrada.bind("<KeyRelease>", formatear_entrada_precio)
+                entrada.bind("<FocusOut>", formatear_entrada_precio, add="+")
             entradas[etiqueta] = entrada
 
         ctk.CTkLabel(
